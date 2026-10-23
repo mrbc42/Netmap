@@ -19,11 +19,47 @@ what it probably is. The result is an interactive diagram in a single HTML file.
 
 ## Install
 
+netmap has no dependencies, so you don't need to install it. Clone it and run it from the folder:
+
 ```bash
-pip install .            # or just run it in place: python -m netmap ...
-netmap offline           # optional: cache the diagram JS so reports work with no internet
-netmap oui-update        # optional: full MAC vendor database (~50k vendors)
+git clone https://github.com/mrbc42/netmap.git
+cd netmap
+python3 -m netmap demo --open
+sudo python3 -m netmap scan
 ```
+
+When the scan finishes, open `network-map.html` (in the same folder) in your browser. `--open` is left off
+the `sudo` command because a browser started as root often fails to open.
+
+To update later, run `git pull` inside the folder.
+
+### Installing a `netmap` command (optional)
+
+```bash
+pip install .
+```
+
+On Debian, Ubuntu and other distributions that use PEP 668, that command fails with
+`error: externally-managed-environment`. Use pipx instead, which installs into its own environment:
+
+```bash
+sudo apt install pipx
+pipx install .
+pipx ensurepath          # then open a new terminal
+netmap demo --open
+sudo $(which netmap) scan   # sudo doesn't see your personal PATH
+```
+
+Don't use `--break-system-packages`. It works, but it can break your system Python.
+
+### Optional extras
+
+```bash
+netmap offline           # cache the diagram JS so reports work with no internet
+netmap oui-update        # full MAC vendor database (~50k vendors)
+```
+
+Without an installed command, run these as `python3 -m netmap offline` and so on.
 
 ## Use
 
@@ -35,6 +71,8 @@ netmap scan 192.168.1.0/24 -p all -e builtin   # all 65535 ports with the built-
 netmap render network-scan.json -o map.html    # re-draw from a saved scan
 netmap info                              # show detected interface, subnet and gateway
 ```
+
+The examples below use the `netmap` command. Without it, use `python3 -m netmap` instead.
 
 Run it with `sudo` (or as Administrator on Windows) for the best results. Root enables a
 fast raw-ICMP sweep, raw traceroute, and nmap's SYN scan and OS detection. Without root it
