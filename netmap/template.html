@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network Map</title>
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root {
+    --bg: #0b1120; --panel: #111827; --panel-2: #1f2937; --border: #263244;
+    --text: #e5e7eb; --muted: #94a3b8; --accent: #38bdf8; --edge: #475569; --edge-core: #94a3b8;
+    --grid: rgba(148,163,184,.06);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f1f5f9; --panel: #ffffff; --panel-2: #f8fafc; --border: #e2e8f0;
+      --text: #0f172a; --muted: #64748b; --accent: #0284c7; --edge: #cbd5e1; --edge-core: #64748b;
+      --grid: rgba(15,23,42,.05);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f1f5f9; --panel: #ffffff; --panel-2: #f8fafc; --border: #e2e8f0;
+    --text: #0f172a; --muted: #64748b; --accent: #0284c7; --edge: #cbd5e1; --edge-core: #64748b;
+    --grid: rgba(15,23,42,.05);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; align-items: center; gap: 24px; padding: 14px 20px; border-bottom: 1px solid var(--border);
+           background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  header h1 .dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+  .meta { color: var(--muted); font-size: 12.5px; }
+  .stats { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+  .stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 6px 12px; min-width: 84px; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+  main { display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
+  #stage { position: relative; min-height: 0;
+           background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+           background-size: 32px 32px; }
+  #network, #table-view { position: absolute; inset: 0; }
+  #table-view { overflow: auto; padding: 60px 20px 20px; display: none; }
+  .toolbar { position: absolute; top: 12px; left: 12px; z-index: 5; display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 11px;
+         font: inherit; font-size: 12.5px; cursor: pointer; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  aside { background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; display: flex; flex-direction: column; }
+  aside section { padding: 16px 18px; border-bottom: 1px solid var(--border); }
+  aside h2 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  input[type=search] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2);
+                       color: var(--text); font: inherit; }
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; }
+  .legend label { display: flex; align-items: center; gap: 7px; font-size: 12.5px; cursor: pointer; padding: 3px 4px; border-radius: 6px; }
+  .legend label:hover { background: var(--panel-2); }
+  .legend img { width: 20px; height: 20px; }
+  .legend .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .legend input { display: none; }
+  .legend input:not(:checked) + img, .legend input:not(:checked) ~ span { opacity: .35; }
+  #details .empty { color: var(--muted); }
+  .dh { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+  .dh img { width: 48px; height: 48px; }
+  .dh .t { font-size: 16px; font-weight: 600; word-break: break-all; }
+  .dh .s { color: var(--muted); font-size: 12.5px; }
+  dl { display: grid; grid-template-columns: 96px 1fr; gap: 4px 10px; margin: 0 0 12px; font-size: 13px; }
+  dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); padding: 6px 6px; }
+  td { border-bottom: 1px solid var(--border); padding: 6px 6px; vertical-align: top; }
+  td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .pill { display: inline-block; white-space: nowrap; padding: 1px 7px; border-radius: 99px; font-size: 11.5px; color: #fff; }
+  .note { color: var(--muted); font-size: 12px; }
+  #table-view table { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  #table-view th { position: sticky; top: 0; background: var(--panel); cursor: pointer; }
+  #table-view tr:hover td { background: var(--panel-2); }
+  div.vis-tooltip { background: var(--panel) !important; color: var(--text) !important; border: 1px solid var(--border) !important;
+                    border-radius: 8px !important; font: 12.5px system-ui, sans-serif !important; padding: 8px 10px !important;
+                    box-shadow: 0 8px 24px rgba(0,0,0,.25) !important; }
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 60vh auto; }
+    aside { border-left: 0; border-top: 1px solid var(--border); }
+    .stats { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1><span class="dot"></span>Network Map</h1>
+    <div class="meta" id="meta"></div>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <div id="stage">
+    <div class="toolbar">
+      <button class="btn on" data-view="diagram">Diagram</button>
+      <button class="btn" data-view="table">Table</button>
+      <span style="width:10px"></span>
+      <button class="btn" data-layout="hierarchical">Tree</button>
+      <button class="btn" data-layout="organic">Organic</button>
+      <button class="btn" id="fit">Fit</button>
+      <button class="btn" id="png">Export PNG</button>
+      <button class="btn" id="json">Export JSON</button>
+      <button class="btn" id="theme" title="Toggle light/dark">Theme</button>
+    </div>
+    <div id="network"></div>
+    <div id="table-view"></div>
+  </div>
+  <aside>
+    <section>
+      <input type="search" id="search" placeholder="Search IP, name, port, vendor…">
+    </section>
+    <section>
+      <h2>Device types</h2>
+      <div class="legend" id="legend"></div>
+    </section>
+    <section id="details"><h2>Details</h2><p class="empty">Click a device in the diagram to see its details.</p></section>
+    <section class="note">
+      Solid lines are known links. Dashed lines are inferred, for example a
+      routed path or a wireless client placed under an access point. Exact switch-port wiring
+      needs LLDP/SNMP data, which an IP scan cannot see.
+    </section>
+  </aside>
+</main>
+<script>
+const DATA = __DATA__;
+const ICONS = DATA.icons, TYPES = DATA.types, SCAN = DATA.scan, GRAPH = DATA.graph;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const typeColor = k => (TYPES[k] || ["", "#64748b"])[1];
+const font = () => ({ multi: "html", color: css("--muted"), size: 12, face: "system-ui", strokeWidth: 0, background: css("--bg"),
+  bold: { color: css("--text"), size: 14, face: "system-ui" },
+  mono: { color: css("--muted"), size: 11, face: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" } });
+const plain = s => String(s ?? "").replace(/[<>]/g, "");
+const typeLabel = k => (TYPES[k] || [k])[0];
+const ipNum = ip => ip.split(".").reduce((a, o) => a * 256 + +o, 0);
+
+// ---------- header
+const hosts = SCAN.hosts;
+const openPorts = hosts.reduce((n, h) => n + h.ports.length, 0);
+$("#meta").textContent = `${SCAN.subnets.join(", ")} · gateway ${SCAN.gateway || "?"} · scanned ${SCAN.started} in ${SCAN.duration_s}s · engine: ${SCAN.engine}`;
+const infra = hosts.filter(h => ["router","firewall","switch","access_point"].includes(h.device_type)).length;
+$("#stats").innerHTML = [["Hosts", hosts.length], ["Open ports", openPorts], ["Infrastructure", infra],
+  ["Subnets", SCAN.subnets.length]].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+
+// ---------- graph
+const hidden = new Set();
+function nodeStyle(n) {
+  const big = ["router","firewall","internet","segment","switch"].includes(n.kind);
+  const lines = [`<b>${plain(n.name)}</b>`];
+  if (n.ip && n.ip !== n.name) lines.push(plain(n.ip));
+  if (n.ports_line) lines.push(`<code>${plain(n.ports_line)}</code>`);
+  return {
+    id: n.id, shape: "image", image: ICONS[n.kind] || ICONS.unknown, size: big ? 30 : 22,
+    label: lines.join("\n"),
+    font: font(),
+    title: tooltip(n),
+    shadow: { enabled: true, color: "rgba(0,0,0,.25)", size: 8, x: 0, y: 3 },
+  };
+}
+function tooltip(n) {
+  const el = document.createElement("div");
+  const h = n.host;
+  el.innerHTML = `<b>${esc(n.name)}</b><br><span style="opacity:.75">${esc(n.type_label || typeLabel(n.kind))}</span>` +
+    (n.ip ? `<br>${esc(n.ip)}` : "") + (h?.vendor ? `<br>${esc(h.vendor)}` : "") +
+    (h?.ports?.length ? `<br>Ports: ${h.ports.map(p => p.port + (p.service ? "/" + esc(p.service) : "")).join(", ")}` : "");
+  return el;
+}
+function edgeStyle(e, i) {
+  const core = ["core", "wan"].includes(e.kind);
+  return { id: i, from: e.from, to: e.to, dashes: e.inferred ? [6, 6] : false, width: core ? 2.5 : 1.3,
+           color: { color: core ? css("--edge-core") : css("--edge"), highlight: css("--accent"), hover: css("--accent") },
+           label: e.label || undefined, font: { color: css("--muted"), size: 11, strokeWidth: 0 },
+           smooth: { type: "cubicBezier", forceDirection: "vertical", roundness: .4 } };
+}
+const nodes = new vis.DataSet(GRAPH.nodes.map(nodeStyle));
+const edges = new vis.DataSet(GRAPH.edges.map(edgeStyle));
+const byId = Object.fromEntries(GRAPH.nodes.map(n => [n.id, n]));
+
+// Tidy tree: hubs (nodes with children) side by side, leaf devices packed into a grid
+// beneath their parent so a 40-host LAN stays readable instead of one endless row.
+const DX = 165, DY = 150, LEAF_DY = 118, MAX_COLS = 6;
+function treeLayout() {
+  const adj = {};
+  GRAPH.nodes.forEach(n => adj[n.id] = []);
+  GRAPH.edges.forEach(e => { adj[e.from]?.push(e.to); adj[e.to]?.push(e.from); });
+  const rootId = byId.internet ? "internet" : (SCAN.gateway && byId[SCAN.gateway]) ? SCAN.gateway : GRAPH.nodes[0]?.id;
+  const kids = {}, seen = new Set();
+  const roots = [rootId, ...GRAPH.nodes.map(n => n.id)].filter(Boolean);
+  const forest = [];
+  for (const r of roots) {
+    if (seen.has(r)) continue;
+    forest.push(r); seen.add(r);
+    const q = [r];
+    while (q.length) {
+      const id = q.shift(); kids[id] = [];
+      for (const nb of adj[id]) if (!seen.has(nb)) { seen.add(nb); kids[id].push(nb); q.push(nb); }
+    }
+  }
+  const size = {};
+  const count = id => size[id] ??= 1 + kids[id].reduce((a, k) => a + count(k), 0);
+  const ipKey = id => byId[id].ip ? ipNum(byId[id].ip.split("/")[0]) : 0;
+  const pos = {}, width = {};
+  function measure(id) {
+    const hubs = kids[id].filter(k => kids[k].length), leaves = kids[id].filter(k => !kids[k].length);
+    const cols = Math.min(MAX_COLS, leaves.length);
+    const w = hubs.reduce((a, h) => a + measure(h), 0) + cols * DX;
+    return width[id] = Math.max(DX, w);
+  }
+  function place(id, x0, y) {
+    pos[id] = { x: x0 + width[id] / 2, y };
+    const hubs = kids[id].filter(k => kids[k].length).sort((a, b) => count(b) - count(a));
+    const leaves = kids[id].filter(k => !kids[k].length).sort((a, b) => ipKey(a) - ipKey(b));
+    const cols = Math.min(MAX_COLS, leaves.length);
+    // Biggest hub left, leaf grid in the middle, the remaining hubs right.
+    const blocks = [...hubs.slice(0, 1), ...(leaves.length ? ["#leaves"] : []), ...hubs.slice(1)];
+    const contentW = hubs.reduce((a, h) => a + width[h], 0) + cols * DX;
+    let cx = x0 + (width[id] - contentW) / 2;
+    for (const b of blocks) {
+      if (b === "#leaves") {
+        const rows = Math.ceil(leaves.length / cols);
+        leaves.forEach((l, i) => {
+          const r = Math.floor(i / cols), inRow = r === rows - 1 ? leaves.length - r * cols : cols;
+          const off = (cols - inRow) * DX / 2;   // centre a short last row
+          pos[l] = { x: cx + off + (i % cols) * DX + DX / 2, y: y + DY + r * LEAF_DY };
+        });
+        cx += cols * DX;
+      } else { place(b, cx, y + (["internet", "hop"].includes(byId[id].kind) ? DY * .7 : DY)); cx += width[b]; }
+    }
+  }
+  let x = 0;
+  for (const r of forest) { measure(r); place(r, x, 0); x += width[r] + DX; }
+  return pos;
+}
+const layouts = {
+  hierarchical: { layout: { hierarchical: { enabled: false } }, physics: { enabled: false } },
+  organic: { layout: { hierarchical: { enabled: false } },
+             physics: { enabled: true, solver: "forceAtlas2Based", stabilization: { iterations: 400 },
+                        forceAtlas2Based: { gravitationalConstant: -110, springLength: 140, springConstant: .05, avoidOverlap: .7 } } },
+};
+let layout = "hierarchical";
+try { layout = localStorage.getItem("netmap.layout") || layout; } catch (e) {}
+
+const network = new vis.Network($("#network"), { nodes, edges }, {
+  interaction: { hover: true, tooltipDelay: 150, keyboard: true },
+  nodes: { shapeProperties: { useImageSize: false, interpolation: true }, scaling: { label: { drawThreshold: 3 } } },
+  ...layouts[layout],
+});
+function setLayout(name) {
+  layout = name;
+  try { localStorage.setItem("netmap.layout", name); } catch (e) {}
+  if (name === "hierarchical") {
+    network.setOptions(layouts.hierarchical);
+    const pos = treeLayout();
+    nodes.update(Object.entries(pos).map(([id, p]) => ({ id, x: p.x, y: p.y })));
+  } else {
+    network.setOptions(layouts.organic);
+    network.stabilize(300);
+  }
+  document.querySelectorAll("[data-layout]").forEach(b => b.classList.toggle("on", b.dataset.layout === name));
+  setTimeout(() => network.fit({ animation: true }), 60);
+}
+document.querySelectorAll("[data-layout]").forEach(b => b.onclick = () => setLayout(b.dataset.layout));
+setLayout(layout);
+$("#fit").onclick = () => network.fit({ animation: true });
+network.once("afterDrawing", () => network.fit());
+network.on("beforeDrawing", ctx => {  // opaque background so exported PNGs look right
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = css("--bg");
+  ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height); ctx.restore();
+});
+
+// ---------- details
+function showDetails(id) {
+  const n = byId[id];
+  if (!n) return;
+  const h = n.host, hop = n.hop;
+  let html = `<h2>Details</h2><div class="dh"><img src="${ICONS[n.kind] || ICONS.unknown}" alt=""><div>
+    <div class="t">${esc(n.name)}</div><div class="s"><span class="pill" style="background:${typeColor(n.kind)}">${esc(n.type_label || typeLabel(n.kind))}</span></div></div></div>`;
+  if (h) {
+    const rows = [["IP", h.ip], ["Hostname", h.hostnames.join(", ")], ["MAC", h.mac], ["Vendor", h.vendor],
+      ["OS / model", h.os_guess], ["Web title", h.http_title], ["Web server", h.http_server],
+      ["Latency", h.latency_ms != null ? h.latency_ms + " ms" : ""], ["TTL", h.ttl], ["Subnet", h.subnet],
+      ["Found via", h.discovered_by.join(", ")], ["Role", [h.is_gateway && "default gateway", h.is_local && "this machine"].filter(Boolean).join(", ")]];
+    html += "<dl>" + rows.filter(r => r[1] !== "" && r[1] != null).map(([k, v]) => `<dt>${k}</dt><dd class="${["IP","MAC"].includes(k) ? "mono" : ""}">${esc(v)}</dd>`).join("") + "</dl>";
+    if (h.ports.length) {
+      html += `<table><tr><th>Port</th><th>Service</th><th>Info</th></tr>` + h.ports.map(p => {
+        const web = /http|https|proxy/.test(p.service) || [80,443,8080,8443,8000,8008,8123,5000,5001,8006,9000,9090,9443,10000,32400].includes(p.port);
+        const scheme = /https|ssl/.test(p.service) || [443,8443,5001,8006,9443,4443].includes(p.port) ? "https" : "http";
+        const port = web ? `<a href="${scheme}://${esc(h.ip)}:${p.port}/" target="_blank" rel="noopener">${p.port}</a>` : p.port;
+        return `<tr><td class="mono">${port}/${p.proto}</td><td>${esc(p.service)}</td><td>${esc(p.banner)}</td></tr>`;
+      }).join("") + "</table>";
+    } else html += `<p class="note">No open TCP ports found in the scanned range.</p>`;
+  } else if (hop) {
+    html += `<dl><dt>IP</dt><dd class="mono">${esc(hop.ip)}</dd><dt>Hostname</dt><dd>${esc(hop.hostname)}</dd>
+      <dt>Hop</dt><dd>${hop.ttl}</dd><dt>RTT</dt><dd>${hop.rtt_ms != null ? hop.rtt_ms + " ms" : "?"}</dd></dl>`;
+  } else {
+    html += `<p class="note">${n.kind === "segment" ? "Layer-2 network that the hosts below are attached to. Shown in place of the physical switches, which an IP scan cannot see."
+                                                    : n.kind === "internet" ? "The route out of your network, found with traceroute." : ""}</p>`;
+  }
+  $("#details").innerHTML = html;
+}
+network.on("click", p => p.nodes.length && showDetails(p.nodes[0]));
+
+// ---------- legend / filters
+const counts = {};
+GRAPH.nodes.forEach(n => counts[n.kind] = (counts[n.kind] || 0) + 1);
+const kinds = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+$("#legend").innerHTML = kinds.map(k => `<label><input type="checkbox" checked data-kind="${k}"><img src="${ICONS[k] || ICONS.unknown}" alt="">
+  <span>${esc(typeLabel(k))}</span><span class="n">${counts[k]}</span></label>`).join("");
+$("#legend").addEventListener("change", e => {
+  const k = e.target.dataset.kind;
+  e.target.checked ? hidden.delete(k) : hidden.add(k);
+  applyFilter();
+});
+
+// ---------- search
+function matches(n, q) {
+  if (!q) return true;
+  const h = n.host || {};
+  const hay = [n.name, n.ip, n.kind, h.mac, h.vendor, h.os_guess, h.http_title, ...(h.hostnames || []),
+               ...(h.ports || []).flatMap(p => [String(p.port), p.service, p.banner])].join(" ").toLowerCase();
+  return q.split(/\s+/).every(t => hay.includes(t));
+}
+function applyFilter() {
+  const q = $("#search").value.trim().toLowerCase();
+  nodes.update(GRAPH.nodes.map(n => {
+    const hide = hidden.has(n.kind);
+    const dim = !hide && q && !matches(n, q);
+    return { id: n.id, hidden: hide, opacity: dim ? .15 : 1 };
+  }));
+  renderTable();
+}
+$("#search").addEventListener("input", applyFilter);
+
+// ---------- table view
+let sortKey = "ip", sortDir = 1;
+function renderTable() {
+  const q = $("#search").value.trim().toLowerCase();
+  const rows = GRAPH.nodes.filter(n => n.host && !hidden.has(n.kind) && matches(n, q));
+  const key = { ip: n => ipNum(n.ip), name: n => n.name.toLowerCase(), type: n => n.kind, vendor: n => (n.host.vendor || "").toLowerCase(),
+                ports: n => n.host.ports.length }[sortKey];
+  rows.sort((a, b) => (key(a) > key(b) ? 1 : key(a) < key(b) ? -1 : 0) * sortDir);
+  $("#table-view").innerHTML = `<table><thead><tr>${[["ip","IP"],["name","Name"],["type","Type"],["vendor","Vendor / MAC"],["ports","Open ports"]]
+      .map(([k, l]) => `<th data-sort="${k}">${l}${sortKey === k ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map(n => `<tr data-id="${esc(n.id)}"><td class="mono">${esc(n.ip)}</td><td>${esc(n.name)}</td>
+      <td><span class="pill" style="background:${typeColor(n.kind)}">${esc(typeLabel(n.kind))}</span></td>
+      <td>${esc(n.host.vendor)}<div class="note mono">${esc(n.host.mac)}</div></td>
+      <td class="mono">${n.host.ports.map(p => p.port + (p.service ? `<span class="note">/${esc(p.service)}</span>` : "")).join(", ")}</td></tr>`).join("") +
+    `</tbody></table>`;
+}
+$("#table-view").addEventListener("click", e => {
+  const th = e.target.closest("th[data-sort]");
+  if (th) { sortDir = sortKey === th.dataset.sort ? -sortDir : 1; sortKey = th.dataset.sort; return renderTable(); }
+  const tr = e.target.closest("tr[data-id]");
+  if (tr) showDetails(tr.dataset.id);
+});
+document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => {
+  document.querySelectorAll("[data-view]").forEach(x => x.classList.toggle("on", x === b));
+  const table = b.dataset.view === "table";
+  $("#table-view").style.display = table ? "block" : "none";
+  $("#network").style.visibility = table ? "hidden" : "visible";
+  if (table) renderTable();
+});
+
+// ---------- exports & theme
+function download(name, url) { const a = document.createElement("a"); a.href = url; a.download = name; a.click(); }
+$("#png").onclick = () => download("network-map.png", $("#network canvas").toDataURL("image/png"));
+$("#json").onclick = () => download("network-scan.json", URL.createObjectURL(new Blob([JSON.stringify(SCAN, null, 2)], { type: "application/json" })));
+$("#theme").onclick = () => {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const cur = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+  document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
+  try { localStorage.setItem("netmap.theme", document.documentElement.dataset.theme); } catch (e) {}
+  restyle();
+};
+function restyle() {
+  nodes.update(GRAPH.nodes.map(n => ({ id: n.id, font: font() })));
+  edges.update(GRAPH.edges.map(edgeStyle));
+}
+try { const t = localStorage.getItem("netmap.theme"); if (t) { document.documentElement.dataset.theme = t; restyle(); } } catch (e) {}
+</script>
+</body>
+</html>

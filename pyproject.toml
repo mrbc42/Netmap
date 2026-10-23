@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netmap"
+version = "0.1.0"
+description = "Automatic network discovery, port scanning and interactive network diagrams"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+full = ["psutil"]   # accurate netmasks on macOS/Windows
+
+[project.scripts]
+netmap = "netmap.cli:main"
+
+[tool.setuptools]
+packages = ["netmap"]
+
+[tool.setuptools.package-data]
+netmap = ["template.html"]
