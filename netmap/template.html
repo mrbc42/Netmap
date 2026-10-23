@@ -31,6 +31,8 @@
            background: var(--panel); flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; display: flex; align-items: center; gap: 10px; }
   header h1 .dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+  body.scanning header h1 .dot { background: #f59e0b; box-shadow: 0 0 10px #f59e0b; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
   .meta { color: var(--muted); font-size: 12.5px; }
   .stats { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
   .stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 6px 12px; min-width: 84px; }
@@ -133,7 +135,8 @@
 </main>
 <script>
 const DATA = __DATA__;
-const ICONS = DATA.icons, TYPES = DATA.types, SCAN = DATA.scan, GRAPH = DATA.graph;
+const ICONS = DATA.icons, TYPES = DATA.types;
+let SCAN = DATA.scan, GRAPH = DATA.graph;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -146,16 +149,22 @@ const typeLabel = k => (TYPES[k] || [k])[0];
 const ipNum = ip => ip.split(".").reduce((a, o) => a * 256 + +o, 0);
 
 // ---------- header
-const hosts = SCAN.hosts;
-const openPorts = hosts.reduce((n, h) => n + h.ports.length, 0);
-$("#meta").textContent = `${SCAN.subnets.join(", ")} · gateway ${SCAN.gateway || "?"} · scanned ${SCAN.started} in ${SCAN.duration_s}s · engine: ${SCAN.engine}`;
-const infra = hosts.filter(h => ["router","firewall","switch","access_point"].includes(h.device_type)).length;
-if ((SCAN.warnings || []).length) {
-  $("#warnings").style.display = "block";
-  $("#warnings").innerHTML = `<b>Scan warnings</b><ul>${SCAN.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>`;
+let liveStatus = "";
+function renderHeader() {
+  const hosts = SCAN.hosts;
+  const openPorts = hosts.reduce((n, h) => n + h.ports.length, 0);
+  const when = DATA.live && !DATA.done ? `scanning since ${SCAN.started}` : `scanned ${SCAN.started} in ${SCAN.duration_s}s`;
+  $("#meta").textContent = `${SCAN.subnets.join(", ") || "…"} · gateway ${SCAN.gateway || "?"} · ${when} · engine: ${SCAN.engine}`
+    + (liveStatus ? ` · ${liveStatus}` : "");
+  const infra = hosts.filter(h => ["router","firewall","switch","access_point"].includes(h.device_type)).length;
+  const warnings = SCAN.warnings || [];
+  $("#warnings").style.display = warnings.length ? "block" : "none";
+  $("#warnings").innerHTML = `<b>Scan warnings</b><ul>${warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>`;
+  $("#stats").innerHTML = [["Hosts", hosts.length], ["Open ports", openPorts], ["Infrastructure", infra],
+    ["Subnets", SCAN.subnets.length]].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+  document.body.classList.toggle("scanning", !!DATA.live && !DATA.done);
 }
-$("#stats").innerHTML = [["Hosts", hosts.length], ["Open ports", openPorts], ["Infrastructure", infra],
-  ["Subnets", SCAN.subnets.length]].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+renderHeader();
 
 // ---------- graph
 const hidden = new Set();
@@ -180,16 +189,17 @@ function tooltip(n) {
     (h?.ports?.length ? `<br>Ports: ${h.ports.map(p => p.port + (p.service ? "/" + esc(p.service) : "")).join(", ")}` : "");
   return el;
 }
-function edgeStyle(e, i) {
+const edgeId = e => `${e.from}|${e.to}`;
+function edgeStyle(e) {
   const core = ["core", "wan"].includes(e.kind);
-  return { id: i, from: e.from, to: e.to, dashes: e.inferred ? [6, 6] : false, width: core ? 2.5 : 1.3,
+  return { id: edgeId(e), from: e.from, to: e.to, dashes: e.inferred ? [6, 6] : false, width: core ? 2.5 : 1.3,
            color: { color: core ? css("--edge-core") : css("--edge"), highlight: css("--accent"), hover: css("--accent") },
            label: e.label || undefined, font: { color: css("--muted"), size: 11, strokeWidth: 0 },
            smooth: { type: "cubicBezier", forceDirection: "vertical", roundness: .4 } };
 }
 const nodes = new vis.DataSet(GRAPH.nodes.map(nodeStyle));
 const edges = new vis.DataSet(GRAPH.edges.map(edgeStyle));
-const byId = Object.fromEntries(GRAPH.nodes.map(n => [n.id, n]));
+let byId = Object.fromEntries(GRAPH.nodes.map(n => [n.id, n]));
 
 // Tidy tree: hubs (nodes with children) side by side, leaf devices packed into a grid
 // beneath their parent so a 40-host LAN stays readable instead of one endless row.
@@ -276,8 +286,11 @@ function setLayout(name) {
 }
 document.querySelectorAll("[data-layout]").forEach(b => b.onclick = () => setLayout(b.dataset.layout));
 setLayout(layout);
-$("#fit").onclick = () => network.fit({ animation: true });
+$("#fit").onclick = () => { userMoved = false; network.fit({ animation: true }); };
 network.once("afterDrawing", () => network.fit());
+let userMoved = false;   // stop auto-fitting once the user pans or zooms
+network.on("dragStart", () => userMoved = true);
+network.on("zoom", () => userMoved = true);
 network.on("beforeDrawing", ctx => {  // opaque background so exported PNGs look right
   ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = css("--bg");
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height); ctx.restore();
@@ -314,14 +327,18 @@ function showDetails(id) {
   }
   $("#details").innerHTML = html;
 }
-network.on("click", p => p.nodes.length && showDetails(p.nodes[0]));
+let selected = null;
+network.on("click", p => { if (p.nodes.length) { selected = p.nodes[0]; showDetails(selected); } });
 
 // ---------- legend / filters
-const counts = {};
-GRAPH.nodes.forEach(n => counts[n.kind] = (counts[n.kind] || 0) + 1);
-const kinds = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
-$("#legend").innerHTML = kinds.map(k => `<label><input type="checkbox" checked data-kind="${k}"><img src="${ICONS[k] || ICONS.unknown}" alt="">
-  <span>${esc(typeLabel(k))}</span><span class="n">${counts[k]}</span></label>`).join("");
+function renderLegend() {
+  const counts = {};
+  GRAPH.nodes.forEach(n => counts[n.kind] = (counts[n.kind] || 0) + 1);
+  const kinds = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  $("#legend").innerHTML = kinds.map(k => `<label><input type="checkbox" ${hidden.has(k) ? "" : "checked"} data-kind="${k}"><img src="${ICONS[k] || ICONS.unknown}" alt="">
+    <span>${esc(typeLabel(k))}</span><span class="n">${counts[k]}</span></label>`).join("");
+}
+renderLegend();
 $("#legend").addEventListener("change", e => {
   const k = e.target.dataset.kind;
   e.target.checked ? hidden.delete(k) : hidden.add(k);
@@ -367,7 +384,7 @@ $("#table-view").addEventListener("click", e => {
   const th = e.target.closest("th[data-sort]");
   if (th) { sortDir = sortKey === th.dataset.sort ? -sortDir : 1; sortKey = th.dataset.sort; return renderTable(); }
   const tr = e.target.closest("tr[data-id]");
-  if (tr) showDetails(tr.dataset.id);
+  if (tr) { selected = tr.dataset.id; showDetails(selected); }
 });
 document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => {
   document.querySelectorAll("[data-view]").forEach(x => x.classList.toggle("on", x === b));
@@ -393,6 +410,41 @@ function restyle() {
   edges.update(GRAPH.edges.map(edgeStyle));
 }
 try { const t = localStorage.getItem("netmap.theme"); if (t) { document.documentElement.dataset.theme = t; restyle(); } } catch (e) {}
+
+// ---------- live mode: the scanner serves data.json and the map grows as hosts are found
+function sync(ds, items) {
+  const keep = new Set(items.map(i => i.id));
+  ds.remove(ds.getIds().filter(id => !keep.has(id)));
+  ds.update(items);
+}
+function applyData(d) {
+  SCAN = d.scan; GRAPH = d.graph; DATA.done = d.done; liveStatus = d.status || "";
+  byId = Object.fromEntries(GRAPH.nodes.map(n => [n.id, n]));
+  sync(nodes, GRAPH.nodes.map(nodeStyle));
+  sync(edges, GRAPH.edges.map(edgeStyle));
+  if (layout === "hierarchical") {
+    const pos = treeLayout();
+    nodes.update(Object.entries(pos).map(([id, p]) => ({ id, x: p.x, y: p.y })));
+  }
+  renderHeader(); renderLegend(); applyFilter();
+  if (selected && byId[selected]) showDetails(selected);
+  if (!userMoved) network.fit({ animation: { duration: 400 } });
+}
+if (DATA.live) {
+  let version = DATA.version, failures = 0;
+  (async function poll() {
+    try {
+      const r = await fetch("data.json", { cache: "no-store" });
+      const d = await r.json();
+      failures = 0;
+      if (d.version !== version) { version = d.version; applyData(d); }
+      if (d.done) return;
+    } catch (e) {
+      if (++failures > 5) { liveStatus = "live connection lost - see the saved report"; renderHeader(); return; }
+    }
+    setTimeout(poll, 1000);
+  })();
+}
 </script>
 </body>
 </html>

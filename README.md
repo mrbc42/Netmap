@@ -28,8 +28,10 @@ python3 -m netmap demo --open
 sudo python3 -m netmap scan
 ```
 
-When the scan finishes, open `network-map.html` (in the same folder) in your browser. `--open` is left off
-the `sudo` command because a browser started as root often fails to open.
+While the scan runs, open **http://127.0.0.1:8765** in your browser. The map fills in live as
+hosts are found and scanned. When it finishes, the final map is also saved as `network-map.html`
+in the same folder. `--open` is left off the `sudo` command because a browser started as root
+often fails to open.
 
 To update later, run `git pull` inside the folder.
 
@@ -87,6 +89,7 @@ still works: it falls back to the system `ping` and TCP connect probes.
 | `--lan-only` | Only scan the main LAN. Skips container/VM bridges, VPNs and routed networks. |
 | `--max-hosts 4096` | Largest range to sweep in full. Bigger ones (e.g. podman's /16) are trimmed to the /24 in use. |
 | `--no-traceroute` | Skip the internet path. |
+| `--no-live`, `--live-port 8765` | Turn off the live map, or change its port. It only listens on 127.0.0.1. |
 | `-o`, `-j` | HTML and JSON output paths. |
 
 ## What gets scanned
@@ -100,6 +103,22 @@ With no targets given, netmap scans **every network it finds**:
 `netmap info` lists what it found. Container and VM networks are drawn hanging off this
 machine, because they are reached through it. If you run netmap *inside* a container, it
 can only see that container's network and prints a warning. Run it on the host instead.
+
+## Phantom hosts
+
+Some networks answer on behalf of addresses that have no device behind them. Examples are
+routers doing proxy-ARP or SYN proxying, transparent proxies, and VPN or security software that
+intercepts connections. A naive scan then "finds" every address with identical ports. netmap
+guards against this:
+
+* On networks this machine is attached to, a host must answer ARP (or ping). A TCP reply alone
+  doesn't count.
+* Before scanning, it tries an address that can't exist. If something answers, TCP replies are
+  distrusted and a warning appears in the report.
+* One MAC claiming most of a subnet is treated as proxy-ARP.
+* Hosts that "answer" on random high ports are marked as catch-all and skipped by the port scan.
+
+Anything it filtered or doubted is listed under **Scan warnings** at the top of the report.
 
 ## How the diagram is built
 

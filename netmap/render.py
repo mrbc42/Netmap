@@ -31,17 +31,22 @@ def fetch_vis() -> Path:
     return VIS_CACHE
 
 
-def render_html(result: ScanResult) -> str:
+def payload(result: ScanResult) -> dict:
+    """The data the page needs: the raw scan plus the graph built from it."""
+    return {"scan": asdict(result), "graph": build_graph(result)}
+
+
+def render_html(result: ScanResult, *, live: bool = False) -> str:
     types = {k: list(v) for k, v in DEVICE_TYPES.items()}
     types.update({"internet": ["Internet", icons.colour("internet")],
                   "segment": ["LAN segment", icons.colour("segment")],
                   "hop": ["Upstream router", icons.colour("hop")]})
-    data = {"scan": asdict(result), "graph": build_graph(result), "icons": icons.all_icons(), "types": types}
-    payload = json.dumps(data).replace("</", "<\\/")  # never let data close the <script>
+    data = {**payload(result), "icons": icons.all_icons(), "types": types, "live": live, "version": 0, "done": not live}
+    blob = json.dumps(data).replace("</", "<\\/")  # never let data close the <script>
     html = TEMPLATE.read_text(encoding="utf-8")
     if VIS_CACHE.exists():  # inline the library -> a single file that works offline
         html = html.replace(VIS_CDN, "<script>" + VIS_CACHE.read_text(encoding="utf-8").replace("</script", "<\\/script") + "</script>")
-    return html.replace("__DATA__", payload)
+    return html.replace("__DATA__", blob)
 
 
 def write_html(result: ScanResult, path: str | Path) -> Path:

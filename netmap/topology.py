@@ -32,6 +32,8 @@ def build_graph(result: ScanResult) -> dict:
     by_ip = {h.ip: h for h in result.hosts}
 
     def add_edge(a: str, b: str, *, inferred: bool = False, label: str = "", kind: str = "lan") -> None:
+        if any({e["from"], e["to"]} == {a, b} for e in edges):
+            return
         edges.append({"from": a, "to": b, "inferred": inferred, "label": label, "kind": kind})
 
     for h in result.hosts:

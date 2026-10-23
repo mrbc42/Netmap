@@ -32,6 +32,11 @@ from .models import Hop, Host, Port, ScanResult
 from .services import HTTP_PORTS, HTTPS_PORTS, PROBE_PORTS, SERVICES
 
 Log = Callable[[str], None]
+Progress = Callable[[ScanResult, "list[Host]", str], None]   # (scan so far, confirmed hosts, status)
+
+
+def _no_progress(result: ScanResult, hosts: list[Host], status: str) -> None:
+    pass
 
 
 def _stderr(msg: str) -> None:
@@ -582,7 +587,7 @@ async def _weed_out_phantoms(result: ScanResult, hosts: dict[str, Host], nets: l
 
 
 async def discover(targets: list[str], *, timeout: float = 1.0, concurrency: int = 512, max_hosts: int = 4096,
-                   log: Log = _stderr) -> tuple[ScanResult, list[Host]]:
+                   log: Log = _stderr, progress: Progress = _no_progress) -> tuple[ScanResult, list[Host]]:
     """Find the hosts that really exist. Shared by the built-in and nmap engines."""
     main_ip, my_ips = netinfo.host_addresses()
     result = ScanResult(started=time.strftime("%Y-%m-%d %H:%M:%S"), local_ip=main_ip, local_ips=my_ips,
@@ -592,11 +597,12 @@ async def discover(targets: list[str], *, timeout: float = 1.0, concurrency: int
     all_ips = [ip for _, ips in nets for ip in ips]
     subnet_of = {ip: n for n, ips in nets for ip in ips}
     log(f"[1/4] discovering hosts in {', '.join(result.subnets)} ({len(all_ips)} addresses)")
+    progress(result, [], f"discovering hosts in {len(all_ips)} addresses")
 
     hosts: dict[str, Host] = {}
 
     def mark(ip: str, how: str) -> Host:
-        h = hosts.setdefault(ip, Host(ip=ip, subnet=subnet_of.get(ip, "")))
+        h = hosts.setdefault(ip, Host(ip=ip, subnet=subnet_of.get(ip, ""), is_gateway=ip == result.gateway))
         if how not in h.discovered_by:
             h.discovered_by.append(how)
         return h
@@ -630,6 +636,8 @@ async def discover(targets: list[str], *, timeout: float = 1.0, concurrency: int
     for ip, (ttl, rtt) in icmp.items():
         h = mark(ip, "icmp")
         h.ttl, h.latency_ms = ttl, round(rtt, 2)
+    # Ping replies are solid evidence, so they can go on the map straight away.
+    progress(result, list(hosts.values()), f"{len(hosts)} hosts answered ping, probing the rest")
 
     sem = asyncio.Semaphore(max(16, concurrency // len(PROBE_PORTS)))
     rest = [ip for ip in all_ips if ip not in hosts]
@@ -639,7 +647,8 @@ async def discover(targets: list[str], *, timeout: float = 1.0, concurrency: int
             mark(ip, "tcp")
     for ip, mac in netinfo.arp_table().items():
         if ip in subnet_of:
-            mark(ip, "arp").mac = mac
+            h = mark(ip, "arp")
+            h.mac, h.vendor = mac, oui.lookup(mac)
     for ip in result.local_ips:
         if ip in subnet_of:
             mark(ip, "self").is_local = True
@@ -654,6 +663,7 @@ async def discover(targets: list[str], *, timeout: float = 1.0, concurrency: int
 
     host_list = await _weed_out_phantoms(result, hosts, nets, tcp_trusted, timeout, concurrency, log)
     log(f"  {len(host_list)} hosts up")
+    progress(result, host_list, f"{len(host_list)} hosts found")
     return result, host_list
 
 
@@ -666,11 +676,20 @@ def _shared_port_warning(result: ScanResult, hosts: list[Host]) -> None:
                                    f"({', '.join(map(str, common[:8]))}) - these may be intercepted by a proxy")
 
 
+def attach_traceroute(result: ScanResult, task: asyncio.Task | None) -> None:
+    """Put the internet path on the map as soon as traceroute finishes."""
+    if task:
+        task.add_done_callback(lambda t: t.cancelled() or t.exception() or setattr(result, "hops", t.result()))
+
+
 async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, concurrency: int = 512,
-               do_traceroute: bool = True, max_hosts: int = 4096, log: Log = _stderr) -> ScanResult:
+               do_traceroute: bool = True, max_hosts: int = 4096, log: Log = _stderr,
+               progress: Progress = _no_progress) -> ScanResult:
     t0 = time.time()
     trace_task = asyncio.create_task(asyncio.to_thread(traceroute)) if do_traceroute else None
-    result, host_list = await discover(targets, timeout=timeout, concurrency=concurrency, max_hosts=max_hosts, log=log)
+    result, host_list = await discover(targets, timeout=timeout, concurrency=concurrency, max_hosts=max_hosts,
+                                       log=log, progress=progress)
+    attach_traceroute(result, trace_task)
 
     to_scan = [h for h in host_list if not h.catch_all]
     log(f"[2/4] scanning {len(ports)} TCP ports on {len(to_scan)} hosts")
@@ -683,6 +702,7 @@ async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, co
         done += 1
         log(f"  [{done}/{len(to_scan)}] {h.ip:<15} {len(h.ports)} open"
             + (f": {', '.join(str(p.port) for p in h.ports[:12])}" if h.ports else ""))
+        progress(result, host_list, f"port scan {done}/{len(to_scan)} hosts")
 
     await asyncio.gather(*(scan_one(h) for h in to_scan))
     _shared_port_warning(result, to_scan)
@@ -694,6 +714,7 @@ async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, co
         h.vendor = oui.lookup(h.mac)
         h.is_gateway = h.ip == result.gateway
     await resolve_names(host_list, log)
+    progress(result, host_list, "names resolved")
     if trace_task:
         log("[4/4] tracing route to the internet")
         result.hops = await trace_task

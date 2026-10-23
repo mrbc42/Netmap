@@ -165,5 +165,24 @@ class PhantomHostTests(unittest.TestCase):
         self.assertEqual(result.warnings, [])
 
 
+class LiveViewTests(unittest.TestCase):
+    def test_serves_page_and_updates(self):
+        import urllib.request
+        from netmap.live import LiveView
+        r = demo_result()
+        live = LiveView(0).start()
+        try:
+            page = urllib.request.urlopen(live.url, timeout=5).read().decode()
+            self.assertIn('"live": true', page)
+            live.publish(r, r.hosts[:3], "port scan 3/28", force=True)
+            d = json.loads(urllib.request.urlopen(live.url + "data.json", timeout=5).read())
+            self.assertEqual((len(d["scan"]["hosts"]), d["done"]), (3, False))
+            live.publish(r, r.hosts, "scan complete", done=True)
+            d = json.loads(urllib.request.urlopen(live.url + "data.json", timeout=5).read())
+            self.assertEqual((len(d["scan"]["hosts"]), d["done"]), (28, True))
+        finally:
+            live.stop(grace=0)
+
+
 if __name__ == "__main__":
     unittest.main()

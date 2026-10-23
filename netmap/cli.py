@@ -12,12 +12,13 @@ from pathlib import Path
 
 from . import __version__, classify, netinfo, nmap_engine, oui, render, scanner
 from .demo import demo_result
+from .live import LiveView
 from .models import ScanResult
 from .render import write_html
 from .services import parse_ports
 
 
-def _finish(result: ScanResult, args) -> None:
+def _finish(result: ScanResult, args, open_file: bool = True) -> None:
     classify.classify_all(result)
     out = write_html(result, args.output)
     if getattr(args, "json", None):
@@ -25,7 +26,7 @@ def _finish(result: ScanResult, args) -> None:
         print(f"scan data  -> {args.json}", file=sys.stderr)
     print(f"diagram    -> {out.resolve()}", file=sys.stderr)
     _summary(result)
-    if args.open:
+    if args.open and open_file:
         webbrowser.open(out.resolve().as_uri())
 
 
@@ -82,9 +83,25 @@ def cmd_scan(args) -> None:
     if not netinfo.is_root():
         print("note: not running as root/admin - ICMP and MAC discovery may be limited", file=sys.stderr)
     run = nmap_engine.scan if engine == "nmap" else scanner.scan
-    result = asyncio.run(run(targets, ports, timeout=args.timeout, concurrency=args.concurrency,
-                             do_traceroute=not args.no_traceroute, max_hosts=args.max_hosts))
-    _finish(result, args)
+    live = None
+    if not args.no_live:
+        live = LiveView(args.live_port).start()
+        print(f"\n  live map: {live.url}  (open it in your browser; it fills in as hosts are found)\n",
+              file=sys.stderr)
+        if args.open:
+            webbrowser.open(live.url)
+    try:
+        result = asyncio.run(run(targets, ports, timeout=args.timeout, concurrency=args.concurrency,
+                                 do_traceroute=not args.no_traceroute, max_hosts=args.max_hosts,
+                                 progress=live.publish if live else scanner._no_progress))
+    except BaseException:
+        if live:
+            live.stop(grace=0)
+        raise
+    _finish(result, args, open_file=not live)
+    if live:
+        live.publish(result, result.hosts, "scan complete", done=True)
+        live.stop()
 
 
 def cmd_render(args) -> None:
@@ -146,6 +163,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--lan-only", action="store_true",
                    help="only scan the main LAN, not container/VM bridges, VPNs or routed networks")
     s.add_argument("--no-traceroute", action="store_true", help="skip the traceroute to the internet")
+    s.add_argument("--no-live", action="store_true", help="don't serve the live map while scanning")
+    s.add_argument("--live-port", type=int, default=8765, help="port for the live map on 127.0.0.1 (default: %(default)s)")
     outputs(s)
     s.set_defaults(func=cmd_scan)
 
