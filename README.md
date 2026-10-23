@@ -22,7 +22,7 @@ what it probably is. The result is an interactive diagram in a single HTML file.
 netmap has no dependencies, so you don't need to install it. Clone it and run it from the folder:
 
 ```bash
-git clone https://github.com/mrbc42/netmap.git
+git clone https://github.com/mrbc42/Netmap.git
 cd netmap
 python3 -m netmap demo --open
 sudo python3 -m netmap scan
