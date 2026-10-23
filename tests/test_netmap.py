@@ -118,5 +118,52 @@ class InterfaceTests(unittest.TestCase):
             self.n.routed_networks = saved
 
 
+class PhantomHostTests(unittest.TestCase):
+    """Networks where something answers for addresses that have no device behind them."""
+
+    def run_discover(self, tcp_state, icmp_ips, arp):
+        import asyncio
+        from unittest import mock
+        from netmap import scanner
+
+        async def fake_tcp(ip, port, timeout):
+            return tcp_state(ip, port)
+
+        with mock.patch.object(scanner, "_tcp_state", fake_tcp), \
+             mock.patch.object(scanner, "icmp_sweep", lambda ips, **k: {ip: (64, 1.0) for ip in ips if ip in icmp_ips}), \
+             mock.patch.object(scanner, "ssdp_devices", lambda *a, **k: {}), \
+             mock.patch.object(scanner.netinfo, "arp_table", lambda: dict(arp)), \
+             mock.patch.object(scanner.netinfo, "host_addresses", lambda: ("192.168.1.50", ["192.168.1.50"])), \
+             mock.patch.object(scanner.netinfo, "default_gateway", lambda: "192.168.1.1"):
+            return asyncio.run(scanner.discover(["192.168.1.0/24"], timeout=0.1, log=lambda m: None))
+
+    def test_interceptor_answering_everything(self):
+        real = {"192.168.1.1", "192.168.1.10", "192.168.1.50"}
+        result, hosts = self.run_discover(lambda ip, port: "open", real,
+                                          {"192.168.1.1": "aa:00:00:00:00:01", "192.168.1.10": "aa:00:00:00:00:10"})
+        self.assertEqual({h.ip for h in hosts}, real)
+        self.assertTrue(all(h.catch_all for h in hosts))
+        self.assertTrue(any("intercepting" in w for w in result.warnings))
+
+    def test_proxy_arp_router(self):
+        real = {f"192.168.1.{i}" for i in range(1, 51)} | {"192.168.1.50"}
+        arp = {ip: f"aa:00:00:00:00:{int(ip.split('.')[-1]):02x}" for ip in real}
+        arp.update({f"192.168.1.{i}": "aa:00:00:00:00:01" for i in range(51, 255)})   # router claims the rest
+        web = lambda ip, port: "open" if port in (80, 443) and ip.startswith("192.168.1.") else "filtered"
+        result, hosts = self.run_discover(web, real, arp)
+        self.assertEqual({h.ip for h in hosts}, real)
+        self.assertTrue(any("proxy-ARP" in w for w in result.warnings))
+
+    def test_normal_network_untouched(self):
+        real = {"192.168.1.1", "192.168.1.7", "192.168.1.50"}
+        arp = {"192.168.1.1": "aa:00:00:00:00:01", "192.168.1.7": "aa:00:00:00:00:07", "192.168.1.9": "aa:00:00:00:00:09"}
+        tcp = lambda ip, port: ("open" if port == 22 else "closed") if ip in real | {"192.168.1.9"} else "filtered"
+        result, hosts = self.run_discover(tcp, real, arp)
+        # .9 ignores ping but is in the ARP table and answers TCP: a real, firewalled host.
+        self.assertEqual({h.ip for h in hosts}, real | {"192.168.1.9"})
+        self.assertFalse(any(h.catch_all for h in hosts))
+        self.assertEqual(result.warnings, [])
+
+
 if __name__ == "__main__":
     unittest.main()

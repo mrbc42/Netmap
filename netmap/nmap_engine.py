@@ -7,14 +7,13 @@ needs root/Administrator for OS detection. Output is parsed from `-oX -`.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import shutil
 import subprocess
 import time
 from xml.etree import ElementTree
 
 from . import netinfo, oui, scanner
-from .models import Host, Port, ScanResult
+from .models import Port, ScanResult
 
 
 def available() -> bool:
@@ -36,40 +35,46 @@ def _port_spec(ports: list[int]) -> str:
     return ",".join(ranges)
 
 
-async def scan(targets: list[str], ports: list[int], *, do_traceroute: bool = True,
-               log: scanner.Log = scanner._stderr, **_) -> ScanResult:
+async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, concurrency: int = 512,
+               do_traceroute: bool = True, max_hosts: int = 4096, log: scanner.Log = scanner._stderr) -> ScanResult:
     t0 = time.time()
+    trace_task = asyncio.create_task(asyncio.to_thread(scanner.traceroute)) if do_traceroute else None
+    # Our own discovery weeds out addresses that only *look* alive (proxies, proxy-ARP),
+    # so nmap spends its time on real hosts only.
+    result, host_list = await scanner.discover(targets, timeout=timeout, concurrency=concurrency,
+                                               max_hosts=max_hosts, log=log)
+    result.engine = "nmap"
+    by_ip = {h.ip: h for h in host_list}
+    to_scan = [h.ip for h in host_list if not h.catch_all]
+
     root = netinfo.is_root()
-    cmd = ["nmap", "-oX", "-", "-T4", "-sV", "--version-light", "--script", "http-title", "-p", _port_spec(ports)]
+    cmd = ["nmap", "-oX", "-", "-T4", "-Pn", "--max-retries", "2", "--host-timeout", "5m",
+           "-sV", "--version-light", "--script", "http-title", "-p", _port_spec(ports)]
     cmd += ["-sS", "-O", "--osscan-limit"] if root else ["-sT"]
-    cmd += targets
-    log(f"running: {' '.join(cmd)}")
+    cmd += ["-iL", "-"]
+    log(f"[2/4] nmap scanning {len(to_scan)} hosts: {' '.join(cmd)}")
     if not root:
         log("  (not root: OS detection disabled, using TCP connect scan)")
+    if to_scan:
+        proc = await asyncio.to_thread(subprocess.run, cmd, input="\n".join(to_scan), capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise SystemExit(f"nmap failed: {proc.stderr.strip()}")
+        xml = ElementTree.fromstring(proc.stdout)
+    else:
+        xml = ElementTree.Element("nmaprun")
 
-    trace_task = asyncio.create_task(asyncio.to_thread(scanner.traceroute)) if do_traceroute else None
-    ssdp_task = asyncio.create_task(asyncio.to_thread(scanner.ssdp_devices))
-    proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise SystemExit(f"nmap failed: {proc.stderr.strip()}")
-
-    main_ip, my_ips = netinfo.host_addresses()
-    result = ScanResult(started=time.strftime("%Y-%m-%d %H:%M:%S"), local_ip=main_ip, local_ips=my_ips,
-                        gateway=netinfo.default_gateway(), engine="nmap",
-                        subnets=[str(ipaddress.ip_network(t, strict=False)) for t in targets])
-    nets = [ipaddress.ip_network(s) for s in result.subnets]
-    for hx in ElementTree.fromstring(proc.stdout).iter("host"):
-        if hx.find("status").get("state") != "up":
+    for hx in xml.iter("host"):
+        ip = next((a.get("addr") for a in hx.iter("address") if a.get("addrtype") == "ipv4"), "")
+        h = by_ip.get(ip)
+        if h is None:
             continue
-        h = Host(ip="", discovered_by=["nmap"])
+        h.discovered_by.append("nmap")
         for a in hx.iter("address"):
-            if a.get("addrtype") == "ipv4":
-                h.ip = a.get("addr")
-            elif a.get("addrtype") == "mac":
-                h.mac = a.get("addr", "").lower()
-                h.vendor = a.get("vendor", "")
-        h.hostnames = [n.get("name") for n in hx.iter("hostname") if n.get("name")]
-        h.hostname = h.hostnames[0] if h.hostnames else ""
+            if a.get("addrtype") == "mac":
+                h.mac = h.mac or a.get("addr", "").lower()
+                h.vendor = h.vendor or a.get("vendor", "")
+        h.hostnames += [n.get("name") for n in hx.iter("hostname") if n.get("name") and n.get("name") not in h.hostnames]
+        h.hostname = h.hostname or (h.hostnames[0] if h.hostnames else "")
         for px in hx.iter("port"):
             if px.find("state").get("state") != "open":
                 continue
@@ -88,22 +93,20 @@ async def scan(targets: list[str], ports: list[int], *, do_traceroute: bool = Tr
             if cls is not None and cls.get("type"):
                 h.os_guess += f" [{cls.get('type')}]"
         times = hx.find("times")
-        if times is not None and times.get("srtt"):
+        if times is not None and times.get("srtt") and h.latency_ms is None:
             h.latency_ms = round(int(times.get("srtt")) / 1000, 2)
+
+    scanner._shared_port_warning(result, [h for h in host_list if not h.catch_all])
+    log("[3/4] identifying devices")
+    arp = netinfo.arp_table()
+    for h in host_list:
+        h.mac = h.mac or arp.get(h.ip, "")
         h.vendor = h.vendor or oui.lookup(h.mac)
         h.is_gateway = h.ip == result.gateway
-        h.is_local = h.ip in (result.local_ips or [result.local_ip])
-        h.subnet = next((str(n) for n in nets if ipaddress.ip_address(h.ip) in n), "")
-        result.hosts.append(h)
-
-    result.hosts.sort(key=lambda h: ipaddress.ip_address(h.ip))
-    log(f"  nmap found {len(result.hosts)} hosts")
-    for ip, info in (await ssdp_task).items():
-        for h in result.hosts:
-            if h.ip == ip and info.get("friendlyName"):
-                h.hostnames.append(info["friendlyName"])
-    await scanner.resolve_names(result.hosts, log)
+    await scanner.resolve_names(host_list, log)
     if trace_task:
+        log("[4/4] tracing route to the internet")
         result.hops = await trace_task
+    result.hosts = host_list
     result.duration_s = round(time.time() - t0, 1)
     return result

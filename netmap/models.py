@@ -33,6 +33,8 @@ class Host:
     is_local: bool = False
     subnet: str = ""
     discovered_by: list[str] = field(default_factory=list)
+    catch_all: bool = False                               # answers on every port - real ports unknown
+    notes: list[str] = field(default_factory=list)
 
     @property
     def open_ports(self) -> set[int]:
@@ -62,6 +64,7 @@ class ScanResult:
     started: str = ""
     duration_s: float = 0.0
     engine: str = "builtin"
+    warnings: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)

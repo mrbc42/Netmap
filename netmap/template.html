@@ -9,24 +9,24 @@
   :root {
     --bg: #0b1120; --panel: #111827; --panel-2: #1f2937; --border: #263244;
     --text: #e5e7eb; --muted: #94a3b8; --accent: #38bdf8; --edge: #475569; --edge-core: #94a3b8;
-    --grid: rgba(148,163,184,.06);
+    --grid: rgba(148,163,184,.06); --warn-bg: #3b2f0b; --warn-text: #fde68a;
   }
   @media (prefers-color-scheme: light) {
     :root:not([data-theme="dark"]) {
       --bg: #f1f5f9; --panel: #ffffff; --panel-2: #f8fafc; --border: #e2e8f0;
       --text: #0f172a; --muted: #64748b; --accent: #0284c7; --edge: #cbd5e1; --edge-core: #64748b;
-      --grid: rgba(15,23,42,.05);
+      --grid: rgba(15,23,42,.05); --warn-bg: #fef3c7; --warn-text: #78350f;
     }
   }
   :root[data-theme="light"] {
     --bg: #f1f5f9; --panel: #ffffff; --panel-2: #f8fafc; --border: #e2e8f0;
     --text: #0f172a; --muted: #64748b; --accent: #0284c7; --edge: #cbd5e1; --edge-core: #64748b;
-    --grid: rgba(15,23,42,.05);
+    --grid: rgba(15,23,42,.05); --warn-bg: #fef3c7; --warn-text: #78350f;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-         display: grid; grid-template-rows: auto 1fr; }
+         display: grid; grid-template-rows: auto auto 1fr; }
   header { display: flex; align-items: center; gap: 24px; padding: 14px 20px; border-bottom: 1px solid var(--border);
            background: var(--panel); flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; display: flex; align-items: center; gap: 10px; }
@@ -37,6 +37,10 @@
   .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
   .stat span { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
   main { display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
+  #warnings { display: none; padding: 10px 20px; background: var(--warn-bg); color: var(--warn-text);
+              border-bottom: 1px solid var(--border); font-size: 13px; }
+  #warnings ul { margin: 4px 0 0; padding-left: 18px; }
+  .host-note { background: var(--warn-bg); color: var(--warn-text); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; margin: 0 0 12px; }
   #stage { position: relative; min-height: 0;
            background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
            background-size: 32px 32px; }
@@ -94,6 +98,7 @@
   </div>
   <div class="stats" id="stats"></div>
 </header>
+<div id="warnings"></div>
 <main>
   <div id="stage">
     <div class="toolbar">
@@ -145,6 +150,10 @@ const hosts = SCAN.hosts;
 const openPorts = hosts.reduce((n, h) => n + h.ports.length, 0);
 $("#meta").textContent = `${SCAN.subnets.join(", ")} · gateway ${SCAN.gateway || "?"} · scanned ${SCAN.started} in ${SCAN.duration_s}s · engine: ${SCAN.engine}`;
 const infra = hosts.filter(h => ["router","firewall","switch","access_point"].includes(h.device_type)).length;
+if ((SCAN.warnings || []).length) {
+  $("#warnings").style.display = "block";
+  $("#warnings").innerHTML = `<b>Scan warnings</b><ul>${SCAN.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>`;
+}
 $("#stats").innerHTML = [["Hosts", hosts.length], ["Open ports", openPorts], ["Infrastructure", infra],
   ["Subnets", SCAN.subnets.length]].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
 
@@ -286,6 +295,7 @@ function showDetails(id) {
       ["OS / model", h.os_guess], ["Web title", h.http_title], ["Web server", h.http_server],
       ["Latency", h.latency_ms != null ? h.latency_ms + " ms" : ""], ["TTL", h.ttl], ["Subnet", h.subnet],
       ["Found via", h.discovered_by.join(", ")], ["Role", [h.is_gateway && "default gateway", h.is_local && "this machine"].filter(Boolean).join(", ")]];
+    html += (h.notes || []).map(n => `<p class="host-note">${esc(n)}</p>`).join("");
     html += "<dl>" + rows.filter(r => r[1] !== "" && r[1] != null).map(([k, v]) => `<dt>${k}</dt><dd class="${["IP","MAC"].includes(k) ? "mono" : ""}">${esc(v)}</dd>`).join("") + "</dl>";
     if (h.ports.length) {
       html += `<table><tr><th>Port</th><th>Service</th><th>Info</th></tr>` + h.ports.map(p => {
@@ -294,7 +304,7 @@ function showDetails(id) {
         const port = web ? `<a href="${scheme}://${esc(h.ip)}:${p.port}/" target="_blank" rel="noopener">${p.port}</a>` : p.port;
         return `<tr><td class="mono">${port}/${p.proto}</td><td>${esc(p.service)}</td><td>${esc(p.banner)}</td></tr>`;
       }).join("") + "</table>";
-    } else html += `<p class="note">No open TCP ports found in the scanned range.</p>`;
+    } else if (!h.catch_all) html += `<p class="note">No open TCP ports found in the scanned range.</p>`;
   } else if (hop) {
     html += `<dl><dt>IP</dt><dd class="mono">${esc(hop.ip)}</dd><dt>Hostname</dt><dd>${esc(hop.hostname)}</dd>
       <dt>Hop</dt><dd>${hop.ttl}</dd><dt>RTT</dt><dd>${hop.rtt_ms != null ? hop.rtt_ms + " ms" : "?"}</dd></dl>`;

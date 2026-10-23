@@ -12,16 +12,18 @@ import asyncio
 import ipaddress
 import os
 import platform
-import subprocess
+import random
 import re
 import select
 import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import time
 import urllib.request
+from collections import defaultdict
 from typing import Callable, Iterable
 from xml.etree import ElementTree
 
@@ -506,9 +508,82 @@ def expand_targets(targets: Iterable[str], max_hosts: int) -> list[tuple[str, li
     return out
 
 
-async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, concurrency: int = 512,
-               do_traceroute: bool = True, max_hosts: int = 4096, log: Log = _stderr) -> ScanResult:
-    t0 = time.time()
+async def _interception_check(timeout: float) -> str:
+    """Connect to an address that cannot exist (TEST-NET-2). Any answer means something on
+    this machine or the network is answering TCP on behalf of hosts that aren't there."""
+    states = await asyncio.gather(*(_tcp_state("198.51.100.73", p, max(timeout, 1.5)) for p in (80, 47231)))
+    return "open" if "open" in states else "closed" if "closed" in states else "filtered"
+
+
+async def _is_catch_all(ip: str, sem: asyncio.Semaphore, timeout: float) -> bool:
+    """A host that 'answers' on random high ports is a proxy/tarpit, not a real port list."""
+    ports = random.sample(range(40000, 60000), 3)
+    async with sem:
+        states = await asyncio.gather(*(_tcp_state(ip, p, timeout) for p in ports))
+    return states.count("open") >= 2
+
+
+async def _weed_out_phantoms(result: ScanResult, hosts: dict[str, Host], nets: list[tuple[str, list[str]]],
+                             tcp_trusted: bool, timeout: float, concurrency: int, log: Log) -> list[Host]:
+    arp = netinfo.arp_table()
+    attached = {n for n, _ in nets if any(ipaddress.ip_address(ip) in ipaddress.ip_network(n) for ip in result.local_ips)}
+    arp_works = any(h.subnet in attached and ip in arp and not h.is_local for ip, h in hosts.items())
+    dropped: dict[str, int] = defaultdict(int)
+
+    def drop(ip: str, why: str) -> None:
+        hosts.pop(ip, None)
+        dropped[why] += 1
+
+    for ip, h in list(hosts.items()):
+        strong = h.is_local or "icmp" in h.discovered_by or "ssdp" in h.discovered_by or ip in arp
+        if strong:
+            continue
+        if h.subnet in attached and arp_works:
+            drop(ip, "answered TCP but not ARP, so not really on the LAN")
+        elif not tcp_trusted:
+            drop(ip, "only evidence was a TCP answer, which this network fakes")
+
+    # Proxy-ARP: one MAC claiming most of a subnet. Keep only hosts that also answered ping.
+    for n, ips in nets:
+        by_mac: dict[str, list[str]] = defaultdict(list)
+        for ip in ips:
+            if ip in hosts and hosts[ip].mac:
+                by_mac[hosts[ip].mac].append(ip)
+        for mac, owners in by_mac.items():
+            if len(owners) > 16 and len(owners) > len(ips) / 2:
+                result.warnings.append(f"{mac} answered ARP for {len(owners)} addresses in {n} (proxy-ARP); "
+                                       "kept only the ones that replied to ping")
+                for ip in owners:
+                    h = hosts[ip]
+                    if not (h.is_local or ip == result.gateway or "icmp" in h.discovered_by):
+                        drop(ip, "proxy-ARP phantom")
+
+    sem = asyncio.Semaphore(max(16, concurrency // 3))
+    ips = list(hosts)
+    for ip, catch_all in zip(ips, await asyncio.gather(*(_is_catch_all(ip, sem, timeout) for ip in ips))):
+        if not catch_all:
+            continue
+        h = hosts[ip]
+        if h.is_local or "icmp" in h.discovered_by or ip in arp:
+            h.catch_all = True
+            h.notes.append("Answers on every TCP port (firewall, SYN proxy or transparent proxy), "
+                           "so its open ports can't be determined")
+        else:
+            drop(ip, "answers on every port and nothing else proves it exists")
+
+    for why, count in dropped.items():
+        log(f"  ignored {count} phantom address{'es' if count != 1 else ''}: {why}")
+    for n, ips in nets:
+        up = sum(1 for ip in ips if ip in hosts)
+        if len(ips) >= 64 and up > 0.9 * len(ips):
+            result.warnings.append(f"{up} of {len(ips)} addresses in {n} look alive - that is unusual "
+                                   "and suggests something answers on behalf of empty addresses")
+    return sorted(hosts.values(), key=lambda h: ipaddress.ip_address(h.ip))
+
+
+async def discover(targets: list[str], *, timeout: float = 1.0, concurrency: int = 512, max_hosts: int = 4096,
+                   log: Log = _stderr) -> tuple[ScanResult, list[Host]]:
+    """Find the hosts that really exist. Shared by the built-in and nmap engines."""
     main_ip, my_ips = netinfo.host_addresses()
     result = ScanResult(started=time.strftime("%Y-%m-%d %H:%M:%S"), local_ip=main_ip, local_ips=my_ips,
                         gateway=netinfo.default_gateway())
@@ -526,9 +601,17 @@ async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, co
             h.discovered_by.append(how)
         return h
 
-    # Run SSDP and traceroute alongside discovery - they're slow but independent.
     ssdp_task = asyncio.create_task(asyncio.to_thread(ssdp_devices))
-    trace_task = asyncio.create_task(asyncio.to_thread(traceroute)) if do_traceroute else None
+    check = await _interception_check(timeout)
+    tcp_trusted = check == "filtered"
+    if check == "open":
+        result.warnings.append("TCP connections to a non-existent address succeed: a proxy, VPN or security "
+                               "software is intercepting this machine's traffic, so open-port results are unreliable")
+    elif check == "closed":
+        result.warnings.append("A firewall answers TCP for unreachable addresses, so TCP replies alone "
+                               "are not treated as proof that a host exists")
+    for w in result.warnings:
+        log(f"  warning: {w}")
 
     icmp = await asyncio.to_thread(icmp_sweep, all_ips)
     if icmp is not None:
@@ -560,10 +643,8 @@ async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, co
     for ip in result.local_ips:
         if ip in subnet_of:
             mark(ip, "self").is_local = True
-    log(f"  {len(hosts)} hosts up")
 
-    ssdp = await ssdp_task
-    for ip, info in ssdp.items():
+    for ip, info in (await ssdp_task).items():
         if ip in hosts:
             h = hosts[ip]
             if info.get("friendlyName"):
@@ -571,8 +652,28 @@ async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, co
             h.os_guess = h.os_guess or " ".join(x for x in (info.get("manufacturer"), info.get("modelName")) if x)
             h.discovered_by.append("ssdp")
 
-    host_list = sorted(hosts.values(), key=lambda h: ipaddress.ip_address(h.ip))
-    log(f"[2/4] scanning {len(ports)} TCP ports on {len(host_list)} hosts")
+    host_list = await _weed_out_phantoms(result, hosts, nets, tcp_trusted, timeout, concurrency, log)
+    log(f"  {len(host_list)} hosts up")
+    return result, host_list
+
+
+def _shared_port_warning(result: ScanResult, hosts: list[Host]) -> None:
+    sets = [tuple(sorted(h.open_ports)) for h in hosts if h.ports]
+    if len(sets) >= 8:
+        common = max(set(sets), key=sets.count)
+        if sets.count(common) >= 0.8 * len(sets) and len(common) >= 2:
+            result.warnings.append(f"{sets.count(common)} hosts report exactly the same open ports "
+                                   f"({', '.join(map(str, common[:8]))}) - these may be intercepted by a proxy")
+
+
+async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, concurrency: int = 512,
+               do_traceroute: bool = True, max_hosts: int = 4096, log: Log = _stderr) -> ScanResult:
+    t0 = time.time()
+    trace_task = asyncio.create_task(asyncio.to_thread(traceroute)) if do_traceroute else None
+    result, host_list = await discover(targets, timeout=timeout, concurrency=concurrency, max_hosts=max_hosts, log=log)
+
+    to_scan = [h for h in host_list if not h.catch_all]
+    log(f"[2/4] scanning {len(ports)} TCP ports on {len(to_scan)} hosts")
     psem = asyncio.Semaphore(concurrency)
     done = 0
 
@@ -580,14 +681,16 @@ async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, co
         nonlocal done
         await _scan_host_ports(h, ports, psem, timeout)
         done += 1
-        log(f"  [{done}/{len(host_list)}] {h.ip:<15} {len(h.ports)} open"
+        log(f"  [{done}/{len(to_scan)}] {h.ip:<15} {len(h.ports)} open"
             + (f": {', '.join(str(p.port) for p in h.ports[:12])}" if h.ports else ""))
 
-    await asyncio.gather(*(scan_one(h) for h in host_list))
+    await asyncio.gather(*(scan_one(h) for h in to_scan))
+    _shared_port_warning(result, to_scan)
 
     log("[3/4] identifying devices")
+    arp = netinfo.arp_table()
     for h in host_list:
-        h.mac = h.mac or netinfo.arp_table().get(h.ip, "")
+        h.mac = h.mac or arp.get(h.ip, "")
         h.vendor = oui.lookup(h.mac)
         h.is_gateway = h.ip == result.gateway
     await resolve_names(host_list, log)
