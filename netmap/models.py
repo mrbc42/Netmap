@@ -57,6 +57,7 @@ class ScanResult:
     subnets: list[str] = field(default_factory=list)
     gateway: str = ""
     local_ip: str = ""
+    local_ips: list[str] = field(default_factory=list)   # every address of this host (LAN, bridges, VPNs)
     hops: list[Hop] = field(default_factory=list)   # traceroute towards the internet
     started: str = ""
     duration_s: float = 0.0

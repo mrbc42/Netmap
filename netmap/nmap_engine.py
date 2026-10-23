@@ -53,7 +53,8 @@ async def scan(targets: list[str], ports: list[int], *, do_traceroute: bool = Tr
     if proc.returncode != 0:
         raise SystemExit(f"nmap failed: {proc.stderr.strip()}")
 
-    result = ScanResult(started=time.strftime("%Y-%m-%d %H:%M:%S"), local_ip=netinfo.local_ip(),
+    main_ip, my_ips = netinfo.host_addresses()
+    result = ScanResult(started=time.strftime("%Y-%m-%d %H:%M:%S"), local_ip=main_ip, local_ips=my_ips,
                         gateway=netinfo.default_gateway(), engine="nmap",
                         subnets=[str(ipaddress.ip_network(t, strict=False)) for t in targets])
     nets = [ipaddress.ip_network(s) for s in result.subnets]
@@ -91,7 +92,7 @@ async def scan(targets: list[str], ports: list[int], *, do_traceroute: bool = Tr
             h.latency_ms = round(int(times.get("srtt")) / 1000, 2)
         h.vendor = h.vendor or oui.lookup(h.mac)
         h.is_gateway = h.ip == result.gateway
-        h.is_local = h.ip == result.local_ip
+        h.is_local = h.ip in (result.local_ips or [result.local_ip])
         h.subnet = next((str(n) for n in nets if ipaddress.ip_address(h.ip) in n), "")
         result.hosts.append(h)
 

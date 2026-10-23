@@ -509,7 +509,8 @@ def expand_targets(targets: Iterable[str], max_hosts: int) -> list[tuple[str, li
 async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, concurrency: int = 512,
                do_traceroute: bool = True, max_hosts: int = 4096, log: Log = _stderr) -> ScanResult:
     t0 = time.time()
-    result = ScanResult(started=time.strftime("%Y-%m-%d %H:%M:%S"), local_ip=netinfo.local_ip(),
+    main_ip, my_ips = netinfo.host_addresses()
+    result = ScanResult(started=time.strftime("%Y-%m-%d %H:%M:%S"), local_ip=main_ip, local_ips=my_ips,
                         gateway=netinfo.default_gateway())
     nets = expand_targets(targets, max_hosts)
     result.subnets = [n for n, _ in nets]
@@ -556,8 +557,9 @@ async def scan(targets: list[str], ports: list[int], *, timeout: float = 1.0, co
     for ip, mac in netinfo.arp_table().items():
         if ip in subnet_of:
             mark(ip, "arp").mac = mac
-    if result.local_ip in subnet_of:
-        mark(result.local_ip, "self").is_local = True
+    for ip in result.local_ips:
+        if ip in subnet_of:
+            mark(ip, "self").is_local = True
     log(f"  {len(hosts)} hosts up")
 
     ssdp = await ssdp_task

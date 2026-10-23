@@ -65,7 +65,7 @@ Without an installed command, run these as `python3 -m netmap offline` and so on
 
 ```bash
 netmap demo --open                       # preview with a sample network, no scanning
-sudo netmap scan --open                  # scan your local subnet (auto-detected)
+sudo netmap scan --open                  # scan every network this machine can see
 sudo netmap scan 192.168.1.0/24 10.0.0.0/24 -p top200
 netmap scan 192.168.1.0/24 -p all -e builtin   # all 65535 ports with the built-in engine
 netmap render network-scan.json -o map.html    # re-draw from a saved scan
@@ -84,8 +84,22 @@ still works: it falls back to the system `ping` and TCP connect probes.
 | `-e auto\|builtin\|nmap` | Scanning engine. `auto` uses nmap when it is installed. |
 | `-t 1.0` | Per-connection timeout in seconds. Raise it on slow Wi-Fi or VPN links. |
 | `-c 512` | Number of simultaneous connections. |
+| `--lan-only` | Only scan the main LAN. Skips container/VM bridges, VPNs and routed networks. |
+| `--max-hosts 4096` | Largest range to sweep in full. Bigger ones (e.g. podman's /16) are trimmed to the /24 in use. |
 | `--no-traceroute` | Skip the internet path. |
 | `-o`, `-j` | HTML and JSON output paths. |
+
+## What gets scanned
+
+With no targets given, netmap scans **every network it finds**:
+
+* the main LAN, which is the interface holding the default route,
+* every other attached interface, including podman/docker/libvirt bridges, VPNs and extra NICs,
+* private networks in the routing table that are reached through another router.
+
+`netmap info` lists what it found. Container and VM networks are drawn hanging off this
+machine, because they are reached through it. If you run netmap *inside* a container, it
+can only see that container's network and prints a warning. Run it on the host instead.
 
 ## How the diagram is built
 

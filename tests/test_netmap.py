@@ -84,5 +84,39 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(len(again.hosts), len(r.hosts))
 
 
+class InterfaceTests(unittest.TestCase):
+    def setUp(self):
+        from netmap import netinfo
+        self.n = netinfo
+        self.saved = {k: getattr(netinfo, k) for k in ("interfaces", "default_gateway", "default_route_interface", "local_ip")}
+        netinfo.interfaces = lambda: [
+            {"name": "podman0", "ip": "10.88.0.1", "netmask": "255.255.0.0", "network": "10.88.0.0/16", "virtual": True},
+            {"name": "wlp2s0", "ip": "192.168.1.50", "netmask": "255.255.255.0", "network": "192.168.1.0/24", "virtual": False},
+        ]
+        netinfo.default_gateway = lambda: "192.168.1.1"
+        netinfo.local_ip = lambda: "10.88.0.1"   # the lookup that went wrong
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(self.n, k, v)
+
+    def test_prefers_lan_over_container_bridge(self):
+        for route_if in ("wlp2s0", ""):
+            self.n.default_route_interface = lambda: route_if
+            self.assertEqual(self.n.primary_interface()["name"], "wlp2s0")
+            self.assertEqual(self.n.local_subnet(), "192.168.1.0/24")
+
+    def test_scans_every_network_by_default(self):
+        from netmap.cli import auto_targets
+        self.n.default_route_interface = lambda: "wlp2s0"
+        saved = self.n.routed_networks
+        self.n.routed_networks = lambda: ["10.10.20.0/24", "192.168.1.0/25"]
+        try:
+            self.assertEqual(auto_targets(False, 4096), ["192.168.1.0/24", "10.88.0.0/24", "10.10.20.0/24"])
+            self.assertEqual(auto_targets(True, 4096), ["192.168.1.0/24"])
+        finally:
+            self.n.routed_networks = saved
+
+
 if __name__ == "__main__":
     unittest.main()

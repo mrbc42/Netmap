@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import sys
 import webbrowser
@@ -36,8 +37,42 @@ def _summary(result: ScanResult) -> None:
     print(f"\n{len(result.hosts)} hosts, {sum(len(h.ports) for h in result.hosts)} open ports, {result.duration_s}s")
 
 
+def _clamp(network: str, near_ip: str | None, label: str, max_hosts: int) -> str:
+    net = ipaddress.ip_network(network)
+    if net.num_addresses <= max_hosts:
+        return str(net)
+    # Container/VM bridges are often /16 but hand out addresses from the bottom up.
+    small = str(ipaddress.ip_network(f"{near_ip or net.network_address}/24", strict=False))
+    print(f"  {label}: {net} has {net.num_addresses} addresses - scanning {small} "
+          f"(raise --max-hosts to sweep all of it)", file=sys.stderr)
+    return small
+
+
+def auto_targets(lan_only: bool, max_hosts: int) -> list[str]:
+    """Every network this host can see: its LAN first, then other interfaces and routed networks."""
+    if netinfo.in_container():
+        print("warning: running inside a container - only the container network is visible.\n"
+              "         Run netmap on the host (or with --network host) to map your LAN.", file=sys.stderr)
+    primary = netinfo.primary_interface()
+    if not primary:
+        return [netinfo.local_subnet(max_hosts)]
+    ifaces = [primary] + [i for i in netinfo.interfaces() if i is not primary and i != primary]
+    if lan_only:
+        ifaces = [primary]
+    found = [(i["network"], i["ip"], f"{i['name']}" + (" (container/VM/VPN)" if i["virtual"] else "")) for i in ifaces]
+    if not lan_only:
+        found += [(n, None, "routed") for n in netinfo.routed_networks()]
+    targets = []
+    for network, ip, label in found:
+        t = _clamp(network, ip, label, max_hosts)
+        if not any(ipaddress.ip_network(t).subnet_of(ipaddress.ip_network(x)) for x in targets):
+            targets.append(t)
+            print(f"network: {t:<18} {label}", file=sys.stderr)
+    return targets
+
+
 def cmd_scan(args) -> None:
-    targets = args.target or [netinfo.local_subnet()]
+    targets = args.target or auto_targets(args.lan_only, args.max_hosts)
     ports = parse_ports(args.ports)
     engine = args.engine
     if engine == "auto":
@@ -67,8 +102,16 @@ def cmd_demo(args) -> None:
 
 
 def cmd_info(_args) -> None:
-    ip = netinfo.local_ip()
-    print(f"local ip : {ip}\nsubnet   : {netinfo.local_subnet(ip)}\ngateway  : {netinfo.default_gateway()}")
+    primary = netinfo.primary_interface() or {}
+    print(f"lan      : {netinfo.local_subnet()} on {primary.get('name', '?')} (this host {primary.get('ip', '?')})")
+    print(f"gateway  : {netinfo.default_gateway() or '?'}")
+    for i in netinfo.interfaces():
+        tag = "  <- main LAN" if i["name"] == primary.get("name") else "  (container/VM/VPN)" if i["virtual"] else ""
+        print(f"  {i['name']:<14} {i['ip']:<16} {i['network']:<19}{tag}")
+    for n in netinfo.routed_networks():
+        print(f"  {'(routed)':<14} {'':<16} {n}")
+    if netinfo.in_container():
+        print("container: yes - run on the host to see your real LAN")
     print(f"root     : {netinfo.is_root()}\nnmap     : {nmap_engine.available()}")
     print(f"oui db   : {'full (' + str(oui.CACHE) + ')' if oui.CACHE.exists() else 'built-in only - run `netmap oui-update`'}")
     print(f"offline  : {'yes' if render.VIS_CACHE.exists() else 'no - run `netmap offline` to inline the diagram library'}")
@@ -92,7 +135,7 @@ def main(argv: list[str] | None = None) -> None:
         sp.add_argument("--open", action="store_true", help="open the diagram in a browser when done")
 
     s = sub.add_parser("scan", help="scan the network and build a diagram")
-    s.add_argument("target", nargs="*", help="CIDRs/IPs to scan (default: the local subnet)")
+    s.add_argument("target", nargs="*", help="CIDRs/IPs to scan (default: every network this host can see)")
     s.add_argument("-p", "--ports", default="top", help="'top' (~90 common), 'top200', 'all', or '22,80,8000-8100'")
     s.add_argument("-e", "--engine", choices=["auto", "builtin", "nmap"], default="auto",
                    help="scanning engine; auto uses nmap if installed (default: %(default)s)")
@@ -100,6 +143,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("-t", "--timeout", type=float, default=1.0, help="per-connection timeout in seconds")
     s.add_argument("-c", "--concurrency", type=int, default=512, help="simultaneous connections")
     s.add_argument("--max-hosts", type=int, default=4096, help="refuse to scan ranges bigger than this")
+    s.add_argument("--lan-only", action="store_true",
+                   help="only scan the main LAN, not container/VM bridges, VPNs or routed networks")
     s.add_argument("--no-traceroute", action="store_true", help="skip the traceroute to the internet")
     outputs(s)
     s.set_defaults(func=cmd_scan)

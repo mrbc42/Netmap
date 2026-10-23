@@ -76,8 +76,13 @@ def build_graph(result: ScanResult) -> dict:
                           "ports_line": f"{len(members)} host{'s' if len(members) != 1 else ''}", "type_label": "LAN segment (layer 2)"})
 
         routers = [h for h in members if h.device_type in ("router", "firewall")]
-        uplink = gw if gw and gw in members else (routers[0] if routers else None)
-        if uplink and uplink.ip != seg_id:
+        # A container/VM bridge: this machine's own address on it is the way in.
+        bridge = next((h for h in members if h.is_local and h.ip != result.local_ip), None)
+        uplink = gw if gw and gw in members else bridge or (routers[0] if routers else None)
+        if bridge and uplink is bridge and result.local_ip in by_ip:
+            add_edge(uplink.ip, seg_id, kind="core")
+            add_edge(result.local_ip, bridge.ip, kind="core", label="same host")
+        elif uplink and uplink.ip != seg_id:
             add_edge(uplink.ip, seg_id, kind="core")
             if result.gateway and uplink.ip != result.gateway:
                 # A second router (lab, DMZ, VPN...) - reachable through the main gateway.

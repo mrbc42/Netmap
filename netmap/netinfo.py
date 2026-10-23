@@ -55,52 +55,133 @@ def default_gateway() -> str:
     return ""
 
 
-def _linux_netmask(ip: str) -> str:
-    """Find the netmask for `ip` via SIOCGIFNETMASK on each interface."""
-    import fcntl  # Linux/macOS only
+# Bridges and tunnels created by containers, VMs and VPNs - never the "real" LAN.
+VIRTUAL_PREFIXES = ("lo", "podman", "docker", "cni", "veth", "virbr", "vnet", "br-", "vmnet", "vboxnet",
+                    "tun", "tap", "wg", "tailscale", "zt", "flannel", "cali", "kube", "lxc", "lxd", "incus")
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def is_virtual(name: str) -> bool:
+    return name.lower().startswith(VIRTUAL_PREFIXES)
+
+
+def interfaces() -> list[dict]:
+    """IPv4 interfaces as [{'name', 'ip', 'netmask', 'network'}], loopback excluded."""
+    found: list[tuple[str, str, str]] = []
     try:
-        for _, name in socket.if_nameindex():
-            ifreq = struct.pack("256s", name.encode()[:15])
-            try:
-                addr = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, ifreq)[20:24])
-                if addr != ip:
-                    continue
-                return socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x891B, ifreq)[20:24])
-            except OSError:
-                continue
-    finally:
-        s.close()
-    return ""
+        import psutil  # optional, cross-platform
 
-
-def local_subnet(ip: str | None = None) -> str:
-    """CIDR of the local network, e.g. '192.168.1.0/24'."""
-    ip = ip or local_ip()
-    mask = ""
-    try:
-        import psutil  # optional, gives cross-platform netmasks
-
-        for addrs in psutil.net_if_addrs().values():
+        for name, addrs in psutil.net_if_addrs().items():
             for a in addrs:
-                if a.family == socket.AF_INET and a.address == ip and a.netmask:
-                    mask = a.netmask
+                if a.family == socket.AF_INET and a.netmask:
+                    found.append((name, a.address, a.netmask))
     except ImportError:
-        pass
-    if not mask and SYSTEM == "Linux":
-        mask = _linux_netmask(ip)
-    if not mask and SYSTEM == "Windows":
-        out = _run(["ipconfig"])
-        m = re.search(re.escape(ip) + r".*?Subnet Mask[ .]*:\s*([\d.]+)", out, re.S)
-        if m:
-            mask = m.group(1)
-    if not mask and SYSTEM == "Darwin":
-        m = re.search(r"inet " + re.escape(ip) + r" netmask (0x[0-9a-f]+)", _run(["ifconfig"]))
-        if m:
-            mask = socket.inet_ntoa(struct.pack(">L", int(m.group(1), 16)))
-    net = ipaddress.ip_network(f"{ip}/{mask or '255.255.255.0'}", strict=False)
+        if SYSTEM in ("Linux", "Darwin"):
+            import fcntl
+
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                for _, name in socket.if_nameindex():
+                    ifreq = struct.pack("256s", name.encode()[:15])
+                    try:
+                        ip = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, ifreq)[20:24])      # SIOCGIFADDR
+                        mask = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x891B, ifreq)[20:24])    # SIOCGIFNETMASK
+                        found.append((name, ip, mask))
+                    except OSError:
+                        continue
+            finally:
+                s.close()
+        if not found and SYSTEM == "Windows":
+            out = _run(["ipconfig"])
+            for m in re.finditer(r"IPv4 Address[ .]*:\s*([\d.]+).*?Subnet Mask[ .]*:\s*([\d.]+)", out, re.S):
+                found.append((f"if{len(found)}", m.group(1), m.group(2)))
+        if not found and SYSTEM == "Darwin":
+            for m in re.finditer(r"^(\S+):.*?(?=^\S|\Z)", _run(["ifconfig"]), re.S | re.M):
+                for ip, hexmask in re.findall(r"inet ([\d.]+) netmask (0x[0-9a-f]+)", m.group(0)):
+                    found.append((m.group(1), ip, socket.inet_ntoa(struct.pack(">L", int(hexmask, 16)))))
+    out = []
+    for name, ip, mask in found:
+        if ip.startswith("127."):
+            continue
+        net = ipaddress.ip_network(f"{ip}/{mask}", strict=False)
+        out.append({"name": name, "ip": ip, "netmask": mask, "network": str(net), "virtual": is_virtual(name)})
+    return out
+
+
+def default_route_interface() -> str:
+    """Name of the interface carrying the default route (Linux; '' elsewhere)."""
+    best, metric = "", None
+    if os.path.exists("/proc/net/route"):
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                cols = line.split()
+                if len(cols) > 6 and cols[1] == "00000000" and (metric is None or int(cols[6]) < metric):
+                    best, metric = cols[0], int(cols[6])
+    return best
+
+
+def routed_networks() -> list[str]:
+    """Private networks the routing table reaches through another router (Linux)."""
+    nets = []
+    if os.path.exists("/proc/net/route"):
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                cols = line.split()
+                if len(cols) < 8 or cols[1] == "00000000" or cols[2] == "00000000":
+                    continue
+                dest = socket.inet_ntoa(struct.pack("<L", int(cols[1], 16)))
+                mask = socket.inet_ntoa(struct.pack("<L", int(cols[7], 16)))
+                net = ipaddress.ip_network(f"{dest}/{mask}", strict=False)
+                if net.is_private and net.prefixlen >= 8:
+                    nets.append(str(net))
+    return nets
+
+
+def primary_interface() -> dict | None:
+    """The LAN interface: the one with the default route, unless that is a VPN/bridge."""
+    ifaces = interfaces()
+    real = [i for i in ifaces if not i["virtual"]]
+    gw, route_if, lip = default_gateway(), default_route_interface(), local_ip()
+
+    def contains(i, ip):
+        try:
+            return ipaddress.ip_address(ip) in ipaddress.ip_network(i["network"])
+        except ValueError:
+            return False
+
+    for pick in (
+        lambda: next(i for i in real if i["name"] == route_if),
+        lambda: next(i for i in real if gw and contains(i, gw)),
+        lambda: next(i for i in real if i["ip"] == lip),
+        lambda: real[0],
+        lambda: next(i for i in ifaces if i["ip"] == lip),
+    ):
+        try:
+            return pick()
+        except (StopIteration, IndexError):
+            continue
+    return None
+
+
+def local_subnet(max_hosts: int = 4096) -> str:
+    """CIDR of the local LAN, e.g. '192.168.1.0/24'. Huge networks shrink to the /24 around us."""
+    iface = primary_interface()
+    if not iface:
+        return str(ipaddress.ip_network(f"{local_ip()}/24", strict=False))
+    net = ipaddress.ip_network(iface["network"])
+    if net.num_addresses > max_hosts:
+        net = ipaddress.ip_network(f"{iface['ip']}/24", strict=False)
     return str(net)
+
+
+def host_addresses() -> tuple[str, list[str]]:
+    """(main LAN address, all addresses) of this machine."""
+    primary = primary_interface()
+    main = primary["ip"] if primary else local_ip()
+    return main, list(dict.fromkeys([main] + [i["ip"] for i in interfaces()]))
+
+
+def in_container() -> bool:
+    return os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
 
 
 def arp_table() -> dict[str, str]:
